@@ -21,6 +21,18 @@ final class QuitPolicyTests: XCTestCase {
         XCTAssertFalse(policy.confirm(ticket, windows: .absent, now: 12))
     }
 
+    func testZeroDelayStillRequiresSuccessfulFreshConfirmation() {
+        for state in [QuitPolicy.Windows.absent, .present(1), .unknown] {
+            var policy = armedPolicy()
+            guard case .verify(let ticket) = policy.observe(.absent, now: 10, delay: 0) else {
+                return XCTFail("Zero delay should immediately require verification")
+            }
+            XCTAssertEqual(ticket.deadline, 10)
+            XCTAssertFalse(policy.quitWasRequested)
+            XCTAssertEqual(policy.confirm(ticket, windows: state, now: 10), state == .absent)
+        }
+    }
+
     func testReopeningAWindowCancelsOldTimerAndStartsAFreshDelay() {
         var policy = armedPolicy()
         let old = waitingTicket(&policy, at: 0)

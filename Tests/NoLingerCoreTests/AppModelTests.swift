@@ -10,6 +10,16 @@ final class AppModelTests: XCTestCase {
     ]
 
     @MainActor
+    func testZeroDelayPersistsAcrossReloads() async {
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults)
+        model.delay = 0
+
+        XCTAssertEqual(AppModel(defaults: defaults).delay, 0)
+    }
+
+    @MainActor
     func testNewSettingsHaveNoExclusionsAndAllowOtherSystemApps() async {
         let (defaults, suiteName) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

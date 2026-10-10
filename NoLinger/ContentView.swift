@@ -78,9 +78,13 @@ struct ContentView: View {
                             .monospacedDigit().foregroundStyle(.secondary)
                         Text("seconds").foregroundStyle(.secondary)
                     }
-                    Slider(value: $model.delay, in: 0.2...10, step: 0.1)
-                    Text("Opening another window cancels the wait. An uncertain window check keeps the app running.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Slider(value: Binding(
+                        get: { model.delay },
+                        set: { value in
+                            let delay = (value * 10).rounded() / 10
+                            if model.delay != delay { model.delay = delay }
+                        }
+                    ), in: 0...10)
                 }
                 .padding(.vertical, 3)
             } header: { Text("Automatic quitting") }

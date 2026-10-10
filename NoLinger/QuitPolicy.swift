@@ -46,7 +46,7 @@ struct QuitPolicy: Sendable {
             return .idle
         case .absent:
             guard hasSeenWindow, !quitWasRequested else { return .idle }
-            let ticket = pending ?? Ticket(generation: generation, deadline: now + max(0.2, delay))
+            let ticket = pending ?? Ticket(generation: generation, deadline: now + max(0, delay))
             pending = ticket
             return now >= ticket.deadline ? .verify(ticket) : .wait(ticket)
         }
@@ -62,7 +62,7 @@ struct QuitPolicy: Sendable {
             cancel()
             return true
         case .present:
-            _ = observe(windows, now: now, delay: 0.2)
+            _ = observe(windows, now: now, delay: 0)
         case .unknown:
             cancel()
         }

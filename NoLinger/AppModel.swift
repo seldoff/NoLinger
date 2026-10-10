@@ -68,7 +68,7 @@ final class AppModel: ObservableObject {
         diagnosticLogFile = DiagnosticLog(directory: logDirectory)
         isPaused = defaults.bool(forKey: "paused")
         let storedDelay = defaults.object(forKey: "delay") as? Double ?? 2.0
-        delay = storedDelay.isFinite ? min(10, max(0.2, storedDelay)) : 2
+        delay = storedDelay.isFinite ? min(10, max(0, storedDelay)) : 2
         scope = MonitorScope(rawValue: defaults.string(forKey: "scope") ?? "") ?? .allExceptExcluded
         hideMenuBarIcon = defaults.bool(forKey: "hideMenuBarIcon")
         let storedExclusions = Self.decodeRules(defaults.data(forKey: "exclusions"))
