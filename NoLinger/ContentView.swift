@@ -42,7 +42,6 @@ struct ContentView: View {
             Picker("Settings section", selection: $tab) {
                 Text("General").tag(0)
                 Text("Apps").tag(1)
-                Text("Logs").tag(2)
             }
             .pickerStyle(.segmented).labelsHidden()
             .padding(.horizontal, 22).padding(.bottom, 16)
@@ -51,7 +50,6 @@ struct ContentView: View {
             Group {
                 switch tab {
                 case 1: appsTab
-                case 2: logsTab
                 default: generalTab
                 }
             }
@@ -103,6 +101,22 @@ struct ContentView: View {
                     Text(message).font(.caption).foregroundStyle(.orange)
                 }
             } header: { Text("Startup and appearance") }
+
+            Section {
+                HStack {
+                    Toggle("Collect logs", isOn: Binding(
+                        get: { model.isCollectingLogs }, set: { model.setCollectLogs($0) }
+                    ))
+                    Spacer()
+                    Button("Show in Finder", action: model.revealCollectedLogs)
+                        .disabled(!model.canAccessCollectedLogs)
+                    Button("Save Logs…", action: model.saveCollectedLogs)
+                        .disabled(!model.canAccessCollectedLogs)
+                }
+                if let message = model.logCollectionMessage {
+                    Text(message).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                }
+            } header: { Text("Logs") }
         }
         .formStyle(.grouped)
     }
@@ -147,26 +161,6 @@ struct ContentView: View {
                     }
                 Spacer()
             }
-        }
-        .padding(22)
-    }
-
-    private var logsTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Toggle("Collect logs", isOn: Binding(
-                    get: { model.isCollectingLogs }, set: { model.setCollectLogs($0) }
-                ))
-                Spacer()
-                Button("Show in Finder", action: model.revealCollectedLogs)
-                    .disabled(!model.canAccessCollectedLogs)
-                Button("Save Logs…", action: model.saveCollectedLogs)
-                    .disabled(!model.canAccessCollectedLogs)
-            }
-            if let message = model.logCollectionMessage {
-                Text(message).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
-            }
-            Spacer(minLength: 0)
         }
         .padding(22)
     }

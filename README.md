@@ -51,9 +51,9 @@ Debug builds accept `--preview` to display Settings and check real permission st
 
 ## Collect logs
 
-Enable **Collect logs** in **Settings → Logs**, reproduce the issue, then use **Save Logs…** to export the collected file or **Show in Finder** to reveal it. Automatic quitting continues normally during collection. Detailed logs record window-check counts and errors from Accessibility and WindowServer, window events, quit decisions, permission changes, settings, and session transitions.
+Enable **Collect logs** in the **Logs** section of **Settings → General**, reproduce the issue, then use **Save Logs…** to export the collected file or **Show in Finder** to reveal it. Automatic quitting continues normally during collection. Detailed logs record window-check counts and errors from Accessibility and WindowServer, window events, quit decisions, permission changes, settings, and session transitions.
 
-Each collection creates a timestamped `.log` file in `~/Library/Logs/NoLinger`. Save any logs you want to keep before turning collection off: disabling collection or quitting No Linger deletes the current file and disables **Save Logs…** and **Show in Finder**. Exported copies are kept. Collection is off on each app launch. Files are capped at 10 MB; reaching the limit or a write failure stops collection, removes the current file, and shows a message in Logs. Start another collection to create a new file.
+Each collection creates a timestamped `.log` file in `~/Library/Logs/NoLinger`. Save any logs you want to keep before turning collection off: disabling collection or quitting No Linger deletes the current file and disables **Save Logs…** and **Show in Finder**. Exported copies are kept. Collection is off on each app launch. Files are capped at 10 MB; reaching the limit or a write failure stops collection, removes the current file, and shows a message in the Logs section of General. Start another collection to create a new file.
 
 Logs contain app names, bundle IDs, process IDs, and window counts, but no window titles or contents. They stay on your Mac unless you share them.
 
