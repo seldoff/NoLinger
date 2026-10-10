@@ -111,7 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if statusItem == nil {
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-            statusItem?.button?.image = NSImage(systemSymbolName: "door.left.hand.open", accessibilityDescription: "No Linger")
+            let symbol = NSImage(systemSymbolName: "door.left.hand.open", accessibilityDescription: "No Linger")
+            statusItem?.button?.image = symbol?.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+            )
         }
         statusItem?.button?.appearsDisabled = model.isPaused
         let menu = NSMenu()
