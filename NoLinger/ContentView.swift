@@ -42,7 +42,7 @@ struct ContentView: View {
             Picker("Settings section", selection: $tab) {
                 Text("General").tag(0)
                 Text("Apps").tag(1)
-                Text("Activity").tag(2)
+                Text("Logs").tag(2)
             }
             .pickerStyle(.segmented).labelsHidden()
             .padding(.horizontal, 22).padding(.bottom, 16)
@@ -51,7 +51,7 @@ struct ContentView: View {
             Group {
                 switch tab {
                 case 1: appsTab
-                case 2: activityTab
+                case 2: logsTab
                 default: generalTab
                 }
             }
@@ -151,32 +151,22 @@ struct ContentView: View {
         .padding(22)
     }
 
-    private var activityTab: some View {
+    private var logsTab: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Recent activity").font(.headline)
+                Toggle("Collect logs", isOn: Binding(
+                    get: { model.isCollectingLogs }, set: { model.setCollectLogs($0) }
+                ))
                 Spacer()
-                Button("Clear") { model.activity.removeAll() }.disabled(model.activity.isEmpty)
+                Button("Show in Finder", action: model.revealCollectedLogs)
+                    .disabled(!model.canAccessCollectedLogs)
+                Button("Save Logs…", action: model.saveCollectedLogs)
+                    .disabled(!model.canAccessCollectedLogs)
             }
-            Text("Quit requests and permission changes from this session. This history is not saved to disk.")
-                .font(.caption).foregroundStyle(.secondary)
-            List {
-                if model.activity.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Nothing to report yet").fontWeight(.medium)
-                        Text("Activity will appear when No Linger requests a quit.").foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 14)
-                }
-                ForEach(model.activity) { entry in
-                    HStack(alignment: .top, spacing: 14) {
-                        Text(entry.date, style: .time).font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                        Text(entry.message).textSelection(.enabled)
-                    }
-                    .padding(.vertical, 5)
-                }
+            if let message = model.logCollectionMessage {
+                Text(message).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            Spacer(minLength: 0)
         }
         .padding(22)
     }

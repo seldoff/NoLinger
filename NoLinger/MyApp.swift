@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model.setCollectLogs(false)
         modelSubscription?.cancel()
         if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
     }

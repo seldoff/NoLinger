@@ -31,12 +31,6 @@ struct MonitoredApp: Identifiable, Equatable, Sendable {
     let isPending: Bool
 }
 
-struct ActivityEntry: Identifiable, Sendable {
-    let id = UUID()
-    let date = Date()
-    let message: String
-}
-
 @MainActor
 final class AppModel: ObservableObject {
     private static let protectedBundleIDs: Set<String> = ["com.apple.finder"]
@@ -47,7 +41,9 @@ final class AppModel: ObservableObject {
     ]
 
     private let defaults: UserDefaults
+    private let diagnosticLogFile: DiagnosticLog
     var onConfigurationChange: (() -> Void)?
+    var onLogCollectionStarted: (() -> Void)?
 
     @Published var isPaused: Bool { didSet { save("paused", isPaused) } }
     @Published var delay: Double { didSet { save("delay", delay) } }
@@ -61,10 +57,15 @@ final class AppModel: ObservableObject {
     @Published var permissionMessage: String?
     @Published var serviceStatus = "Starting…"
     @Published var monitoredApps: [MonitoredApp] = []
-    @Published var activity: [ActivityEntry] = []
+    @Published private(set) var isCollectingLogs = false
+    @Published private(set) var collectedLogURL: URL?
+    @Published private(set) var logCollectionMessage: String?
 
-    init(defaults: UserDefaults = .standard) {
+    var canAccessCollectedLogs: Bool { isCollectingLogs && collectedLogURL != nil }
+
+    init(defaults: UserDefaults = .standard, logDirectory: URL = DiagnosticLog.defaultDirectory) {
         self.defaults = defaults
+        diagnosticLogFile = DiagnosticLog(directory: logDirectory)
         isPaused = defaults.bool(forKey: "paused")
         let storedDelay = defaults.object(forKey: "delay") as? Double ?? 2.0
         delay = storedDelay.isFinite ? min(10, max(0.2, storedDelay)) : 2
@@ -189,9 +190,83 @@ final class AppModel: ObservableObject {
         loginNeedsApproval = status == .requiresApproval
     }
 
-    func log(_ message: String) {
-        activity.insert(ActivityEntry(message: message), at: 0)
-        if activity.count > 60 { activity.removeLast(activity.count - 60) }
+    func setCollectLogs(_ enabled: Bool) {
+        guard enabled != isCollectingLogs else { return }
+        logCollectionMessage = nil
+        if enabled {
+            do {
+                collectedLogURL = try diagnosticLogFile.start()
+                isCollectingLogs = true
+                diagnosticLog("Log collection started. Automatic quitting continues normally.", category: "session")
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+                let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+                diagnosticLog("No Linger \(version) (\(build)); \(ProcessInfo.processInfo.operatingSystemVersionString)", category: "session")
+                logConfiguration()
+                diagnosticLog("Window access=\(accessibilityGranted); service=\(serviceStatus)", category: "session")
+                for app in monitoredApps {
+                    diagnosticLog("\(app.name) [\(app.bundleID)] pid=\(app.id): \(app.status)", category: "snapshot")
+                }
+                onLogCollectionStarted?()
+            } catch {
+                handleLogCollectionError(error)
+            }
+        } else {
+            do { try discardCollectedLogs() }
+            catch { logCollectionMessage = "Couldn’t remove collected logs: \(error.localizedDescription)" }
+        }
+    }
+
+    /// Writes only while a log collection is active.
+    func diagnosticLog(_ message: @autoclosure () -> String, category: String = "monitor") {
+        guard isCollectingLogs else { return }
+        do { try diagnosticLogFile.append(message(), category: category) }
+        catch { handleLogCollectionError(error) }
+    }
+
+    func logConfiguration() {
+        diagnosticLog("Paused=\(isPaused); delay=\(delay)s; scope=\(scope.rawValue); exclusions=\(exclusions.map(\.bundleID).sorted()); inclusions=\(inclusions.map(\.bundleID).sorted())", category: "configuration")
+    }
+
+    func revealCollectedLogs() {
+        guard canAccessCollectedLogs, let collectedLogURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([collectedLogURL])
+    }
+
+    func saveCollectedLogs() {
+        guard canAccessCollectedLogs, let source = collectedLogURL else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save collected logs"
+        panel.allowedContentTypes = [.log]
+        panel.nameFieldStringValue = source.lastPathComponent
+        panel.begin { [weak self] response in
+            guard response == .OK, let destination = panel.url else { return }
+            do { try self?.exportCollectedLogs(to: destination) }
+            catch { self?.logCollectionMessage = "Couldn’t save logs: \(error.localizedDescription)" }
+        }
+    }
+
+    func exportCollectedLogs(to destination: URL) throws {
+        guard canAccessCollectedLogs, let source = collectedLogURL else { return }
+        try diagnosticLogFile.flush()
+        guard source.standardizedFileURL != destination.standardizedFileURL else { return }
+        try Data(contentsOf: source).write(to: destination, options: .atomic)
+        logCollectionMessage = nil
+    }
+
+    private func handleLogCollectionError(_ error: Error) {
+        let message = "Log collection stopped: \(error.localizedDescription)"
+        do {
+            try discardCollectedLogs()
+            logCollectionMessage = message
+        } catch {
+            logCollectionMessage = "\(message) Couldn’t remove the log file: \(error.localizedDescription)"
+        }
+    }
+
+    private func discardCollectedLogs() throws {
+        isCollectingLogs = false
+        collectedLogURL = nil
+        try diagnosticLogFile.discard()
     }
 
     func icon(path: String?, bundleID: String) -> NSImage {
@@ -203,12 +278,14 @@ final class AppModel: ObservableObject {
 
     private func save(_ key: String, _ value: Any) {
         defaults.set(value, forKey: key)
+        logConfiguration()
         onConfigurationChange?()
     }
 
     private func persistRules() {
         defaults.set(try? JSONEncoder().encode(exclusions), forKey: "exclusions")
         defaults.set(try? JSONEncoder().encode(inclusions), forKey: "inclusions")
+        logConfiguration()
         onConfigurationChange?()
     }
 

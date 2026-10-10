@@ -9,6 +9,13 @@ extension Notification.Name {
 struct WindowInspection: Sendable {
     let windows: QuitPolicy.Windows
     let detail: String
+    let diagnostics: String
+
+    init(windows: QuitPolicy.Windows, detail: String, diagnostics: String = "") {
+        self.windows = windows
+        self.detail = detail
+        self.diagnostics = diagnostics
+    }
 }
 
 /// Owns every Accessibility reference on one actor; no AX messaging blocks the UI.
@@ -17,6 +24,7 @@ actor AccessibilityProbe {
         let session: UUID
         let element: AXUIElement
         let observer: AXObserver?
+        let observerDetail: String
         var windows: [AXUIElement] = []
 
         init(pid: pid_t, session: UUID) {
@@ -35,12 +43,15 @@ actor AccessibilityProbe {
                 )
             }, &created)
             observer = result == .success ? created : nil
+            var registrations: [String] = []
             if let observer {
                 for name in [kAXWindowCreatedNotification, kAXMainWindowChangedNotification] {
-                    _ = AXObserverAddNotification(observer, element, name as CFString, nil)
+                    let error = AXObserverAddNotification(observer, element, name as CFString, nil)
+                    registrations.append("\(name)=\(error.rawValue)")
                 }
                 CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
             }
+            observerDetail = "creation=\(result.rawValue); registrations=\(registrations)"
         }
 
         func stop() {
@@ -67,7 +78,8 @@ actor AccessibilityProbe {
         var value: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(watch.element, kAXWindowsAttribute as CFString, &value)
         guard result == .success, let listed = value as? [AXUIElement] else {
-            return .init(windows: .unknown, detail: "Window check unavailable (AX \(result.rawValue))")
+            return .init(windows: .unknown, detail: "Window check unavailable (AX \(result.rawValue))",
+                         diagnostics: "AX windows=\(result.rawValue); validArray=\(value is [AXUIElement]); observer: \(watch.observerDetail)")
         }
 
         // Do not replace our model with a Space-limited list. A missing known window
@@ -79,13 +91,20 @@ actor AccessibilityProbe {
 
         var alive: [AXUIElement] = []
         var uncertain = false
+        var invalidCount = 0
+        var roleErrors: [Int32] = []
+        var notificationErrors: [Int32] = []
         for window in candidates {
             guard !Task.isCancelled else { return .init(windows: .unknown, detail: "Check cancelled") }
             AXUIElementSetMessagingTimeout(window, 0.25)
             var role: CFTypeRef?
             let error = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role)
-            if error == .invalidUIElement { continue }
+            if error == .invalidUIElement {
+                invalidCount += 1
+                continue
+            }
             guard error == .success, let roleName = role as? String else {
+                roleErrors.append(error.rawValue)
                 uncertain = true
                 alive.append(window)
                 continue
@@ -93,26 +112,29 @@ actor AccessibilityProbe {
             guard roleName == kAXWindowRole as String else { continue }
             if !alive.contains(where: { CFEqual($0, window) }) { alive.append(window) }
             if !watch.windows.contains(where: { CFEqual($0, window) }), let observer = watch.observer {
-                _ = AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, nil)
+                let error = AXObserverAddNotification(observer, window, kAXUIElementDestroyedNotification as CFString, nil)
+                if error != .success { notificationErrors.append(error.rawValue) }
             }
         }
         watch.windows = alive
 
         // WindowServer information is a second source. Only required, non-sensitive
         // metadata is read: no titles, images, private APIs, or capture permission.
-        guard let catalog = Self.windowServerWindows(for: pid) else {
-            return .init(windows: .unknown, detail: "WindowServer check unavailable")
+        let catalog = Self.windowServerWindows(for: pid)
+        let diagnostics = "AX listed=\(listed.count), retained=\(candidates.count - listed.count), alive=\(alive.count), invalid=\(invalidCount), roleErrors=\(roleErrors); WindowServer=\(catalog.map { String($0.count) } ?? "unavailable"); observer: \(watch.observerDetail); windowNotificationErrors=\(notificationErrors)"
+        guard let catalog else {
+            return .init(windows: .unknown, detail: "WindowServer check unavailable", diagnostics: diagnostics)
         }
         if !catalog.isEmpty {
-            return .init(windows: .present(max(alive.count, catalog.count)), detail: "\(max(alive.count, catalog.count)) window(s)")
+            return .init(windows: .present(max(alive.count, catalog.count)), detail: "\(max(alive.count, catalog.count)) window(s)", diagnostics: diagnostics)
         }
         if uncertain {
-            return .init(windows: .unknown, detail: "A known window could not be verified")
+            return .init(windows: .unknown, detail: "A known window could not be verified", diagnostics: diagnostics)
         }
         if !alive.isEmpty {
-            return .init(windows: .present(alive.count), detail: "\(alive.count) window(s)")
+            return .init(windows: .present(alive.count), detail: "\(alive.count) window(s)", diagnostics: diagnostics)
         }
-        return .init(windows: .absent, detail: "No windows")
+        return .init(windows: .absent, detail: "No windows", diagnostics: diagnostics)
     }
 
     func remove(pid: pid_t, session: UUID) {

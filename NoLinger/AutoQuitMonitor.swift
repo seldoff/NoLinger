@@ -56,6 +56,8 @@ final class AutoQuitMonitor: NSObject {
         guard !isRunning else { return }
         isRunning = true
         isPreview = preview
+        model.onLogCollectionStarted = { [weak self] in self?.logSnapshot() }
+        model.diagnosticLog("Monitor started; preview=\(preview)", category: "lifecycle")
         if preview {
             // Read real permission state, without observing windows or quitting apps.
             refreshPermission()
@@ -85,7 +87,7 @@ final class AutoQuitMonitor: NSObject {
                 guard let self else { break }
                 self.reconcileApps()
                 guard self.canMonitor else { continue }
-                for pid in self.records.keys { self.scan(pid) }
+                for pid in self.records.keys { self.scan(pid, reason: "recovery") }
             }
         }
     }
@@ -100,11 +102,13 @@ final class AutoQuitMonitor: NSObject {
     }
 
     func stop() async {
+        model.diagnosticLog("Monitor stopping; cancelling all pending work", category: "lifecycle")
         isRunning = false
         permissionTask?.cancel()
         recoveryTask?.cancel()
         settleTask?.cancel()
         model.onConfigurationChange = nil
+        model.onLogCollectionStarted = nil
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
         for record in records.values { record.cancel(resetHistory: true) }
@@ -115,15 +119,16 @@ final class AutoQuitMonitor: NSObject {
     func refreshPermission() {
         let granted = AXIsProcessTrusted()
         guard granted != model.accessibilityGranted else { updateServiceStatus(); return }
+        model.diagnosticLog("Window access changed: \(granted)", category: "permission")
         model.accessibilityGranted = granted
         cancelAll(resetHistory: true)
         if granted {
-            model.log(isPreview ? "\(model.windowAccessPermissionName) granted."
-                      : "\(model.windowAccessPermissionName) granted. Monitoring started.")
+            model.diagnosticLog(isPreview ? "\(model.windowAccessPermissionName) granted."
+                                : "\(model.windowAccessPermissionName) granted. Monitoring started.", category: "permission")
             reconcileApps()
             for pid in records.keys { scan(pid) }
         } else {
-            model.log("\(model.windowAccessPermissionName) unavailable. Auto-quit is disabled.")
+            model.diagnosticLog("\(model.windowAccessPermissionName) unavailable. Auto-quit is disabled.", category: "permission")
             let old = records
             records.removeAll()
             for (pid, record) in old {
@@ -141,6 +146,7 @@ final class AutoQuitMonitor: NSObject {
     }
 
     private func configurationChanged() {
+        model.diagnosticLog("Configuration changed; invalidating window history and pending quits")
         // Pause, delay edits, and rule changes invalidate every outstanding result.
         cancelAll(resetHistory: true)
         reconcileApps()
@@ -148,7 +154,11 @@ final class AutoQuitMonitor: NSObject {
         updateServiceStatus()
     }
 
-    @objc private func appsChanged() { reconcileApps() }
+    @objc private func appsChanged(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        model.diagnosticLog("\(notification.name.rawValue): \(app?.localizedName ?? "unknown") [\(app?.bundleIdentifier ?? "unknown")] pid=\(app?.processIdentifier ?? 0)", category: "workspace")
+        reconcileApps()
+    }
 
     private func reconcileApps() {
         guard isRunning, !isPreview else { return }
@@ -168,12 +178,15 @@ final class AutoQuitMonitor: NSObject {
             let wasReplaced = candidate != nil && (record.app.isTerminated || record.app.launchDate != candidate?.launchDate)
             guard candidate == nil || wasReplaced else { continue }
             if let record = records.removeValue(forKey: pid) {
+                model.diagnosticLog("Stopped monitoring \(identity(record)); replaced=\(wasReplaced)")
                 record.cancel(resetHistory: true)
                 Task { await probe.remove(pid: pid, session: record.session) }
             }
         }
         for (pid, app) in eligible where records[pid] == nil {
-            records[pid] = Record(app: app)
+            let record = Record(app: app)
+            records[pid] = record
+            model.diagnosticLog("Started monitoring \(identity(record))")
             if canMonitor { scan(pid) }
         }
         publishApps()
@@ -182,7 +195,10 @@ final class AutoQuitMonitor: NSObject {
 
     @objc private func accessibilityEvent(_ notification: Notification) {
         guard let pid = notification.userInfo?["pid"] as? pid_t,
-              let record = records[pid], canMonitor else { return }
+              let record = records[pid] else { return }
+        let event = notification.userInfo?["notification"] as? String ?? "unknown"
+        model.diagnosticLog("\(event): \(identity(record)); monitoring=\(canMonitor); pending=\(String(describing: record.policy.pending))", category: "accessibility")
+        guard canMonitor else { return }
         // Every window event invalidates a queued confirmation, including a window
         // that opens and closes entirely between our ten-second recovery scans.
         record.cancel(resetHistory: false)
@@ -194,22 +210,28 @@ final class AutoQuitMonitor: NSObject {
                 do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
                 guard !Task.isCancelled, let self, let record, self.canMonitor,
                       self.records[pid] === record, record.revision == revision else { return }
-                self.scan(pid)
+                self.scan(pid, reason: "accessibility event")
             }
             record?.eventTask = nil
         }
     }
 
-    private func scan(_ pid: pid_t) {
+    private func scan(_ pid: pid_t, reason: String = "refresh") {
         guard canMonitor, let record = records[pid], record.scanTask == nil else { return }
         let revision = record.revision
         let session = record.session
         record.scanTask = Task { [weak self, weak record, probe] in
             let inspection = await probe.inspect(pid: pid, session: session)
-            guard !Task.isCancelled, let self, let record,
-                  self.records[pid] === record, record.revision == revision, self.canMonitor else { return }
+            guard let self, let record else { return }
+            guard !Task.isCancelled, self.records[pid] === record,
+                  record.revision == revision, self.canMonitor else {
+                self.model.diagnosticLog("Discarded stale \(reason) check for \(self.identity(record)); revision=\(revision)")
+                return
+            }
             record.scanTask = nil
+            self.logInspection(inspection, record: record, phase: reason)
             let decision = record.policy.observe(inspection.windows, now: self.now, delay: self.model.delay)
+            self.model.diagnosticLog("\(self.identity(record)): decision=\(decision); hasSeenWindow=\(record.policy.hasSeenWindow); quitWasRequested=\(record.policy.quitWasRequested)", category: "decision")
             self.apply(decision, pid: pid, record: record, inspection: inspection)
         }
     }
@@ -236,21 +258,27 @@ final class AutoQuitMonitor: NSObject {
         let session = record.session
         let revision = record.revision
         let wait = max(0, ticket.deadline - now)
+        model.diagnosticLog("Scheduled confirmation for \(identity(record)); wait=\(wait)s; ticket=\(ticket); revision=\(revision)", category: "decision")
         record.quitTask = Task { [weak self, weak record, probe] in
             do { try await Task.sleep(for: .seconds(wait)) } catch { return }
             guard !Task.isCancelled, let self, let record, self.canMonitor,
                   self.records[pid] === record, record.revision == revision,
                   record.policy.pending == ticket else { return }
+            self.model.diagnosticLog("Verifying quit for \(self.identity(record)); ticket=\(ticket)", category: "decision")
             record.status = "Verifying…"
             self.publishApps()
 
             // This is a new AX + WindowServer query, never an earlier cached snapshot.
             let inspection = await probe.inspect(pid: pid, session: session)
+            self.logInspection(inspection, record: record, phase: "quit confirmation")
             guard !Task.isCancelled, self.canMonitor, self.records[pid] === record,
                   record.revision == revision, record.policy.pending == ticket,
                   !record.app.isTerminated, record.app.activationPolicy == .regular,
                   let bundleID = record.app.bundleIdentifier, self.model.shouldMonitor(bundleID: bundleID),
-                  AXIsProcessTrusted() else { return }
+                  AXIsProcessTrusted() else {
+                self.model.diagnosticLog("Discarded stale or ineligible confirmation for \(self.identity(record)); ticket=\(ticket)", category: "decision")
+                return
+            }
             record.quitTask = nil
             record.scheduledTicket = nil
             if record.policy.confirm(ticket, windows: inspection.windows, now: self.now) {
@@ -258,9 +286,11 @@ final class AutoQuitMonitor: NSObject {
                 // Normal quit only. A cancelled/refused request is not retried until
                 // a window is subsequently observed and closed again.
                 let sent = record.app.terminate()
+                self.model.diagnosticLog("Normal quit request for \(self.identity(record)); accepted=\(sent)", category: "decision")
                 record.status = sent ? "Quit requested" : "Quit request declined"
-                self.model.log(sent ? "Asked \(name) to quit after its last window closed." : "\(name) did not accept the quit request; kept running.")
+                self.model.diagnosticLog(sent ? "Asked \(name) to quit after its last window closed." : "\(name) did not accept the quit request; kept running.", category: "decision")
             } else {
+                self.model.diagnosticLog("Quit cancelled for \(self.identity(record)): \(inspection.detail)", category: "decision")
                 record.status = inspection.detail
             }
             self.publishApps()
@@ -269,6 +299,7 @@ final class AutoQuitMonitor: NSObject {
 
     private func cancelAll(resetHistory: Bool) {
         for record in records.values {
+            model.diagnosticLog("Cancelling work for \(identity(record)); resetHistory=\(resetHistory); pending=\(String(describing: record.policy.pending))", category: "decision")
             record.cancel(resetHistory: resetHistory)
             record.status = "Waiting for a fresh window check"
         }
@@ -276,28 +307,35 @@ final class AutoQuitMonitor: NSObject {
     }
 
     @objc private func willSleep() {
+        model.diagnosticLog("Sleep: cancelling pending quits", category: "lifecycle")
         isSleeping = true
         cancelAll(resetHistory: true)
         updateServiceStatus()
     }
 
     @objc private func didWake() {
+        model.diagnosticLog("Wake: waiting for Desktop to settle", category: "lifecycle")
         isSleeping = false
         settle(after: 3)
     }
 
     @objc private func sessionInactive() {
+        model.diagnosticLog("Session inactive: cancelling pending quits", category: "lifecycle")
         isSessionActive = false
         cancelAll(resetHistory: true)
         updateServiceStatus()
     }
 
     @objc private func sessionActive() {
+        model.diagnosticLog("Session active: waiting for Desktop to settle", category: "lifecycle")
         isSessionActive = true
         settle(after: 3)
     }
 
-    @objc private func spaceChanged() { settle(after: 3) }
+    @objc private func spaceChanged() {
+        model.diagnosticLog("Space changed: waiting for Desktop to settle", category: "lifecycle")
+        settle(after: 3)
+    }
 
     private func settle(after seconds: Double) {
         settleUntil = now + seconds
@@ -321,7 +359,25 @@ final class AutoQuitMonitor: NSObject {
         else if isSleeping || !isSessionActive { status = "Waiting for your session" }
         else if now < settleUntil { status = "Waiting for Desktop to settle" }
         else { status = "Monitoring \(records.count) app\(records.count == 1 ? "" : "s")" }
-        if model.serviceStatus != status { model.serviceStatus = status }
+        if model.serviceStatus != status {
+            model.serviceStatus = status
+            model.diagnosticLog("Service status: \(status)", category: "lifecycle")
+        }
+    }
+
+    private func identity(_ record: Record) -> String {
+        "\(record.app.localizedName ?? "unknown") [\(record.app.bundleIdentifier ?? "unknown")] pid=\(record.app.processIdentifier) session=\(record.session)"
+    }
+
+    private func logInspection(_ inspection: WindowInspection, record: Record, phase: String) {
+        model.diagnosticLog("\(identity(record)): \(phase); windows=\(inspection.windows); \(inspection.detail); \(inspection.diagnostics); revision=\(record.revision)", category: "windows")
+    }
+
+    private func logSnapshot() {
+        model.diagnosticLog("Running=\(isRunning); preview=\(isPreview); sleeping=\(isSleeping); sessionActive=\(isSessionActive); settlingFor=\(max(0, settleUntil - now))s; canMonitor=\(canMonitor)", category: "snapshot")
+        for record in records.values {
+            model.diagnosticLog("\(identity(record)): revision=\(record.revision); hasSeenWindow=\(record.policy.hasSeenWindow); quitWasRequested=\(record.policy.quitWasRequested); pending=\(String(describing: record.policy.pending))", category: "snapshot")
+        }
     }
 
     private func publishApps() {
