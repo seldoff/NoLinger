@@ -11,10 +11,10 @@ func generateAppIcon() throws {
         ?? projectRoot.appendingPathComponent("NoLinger/Assets.xcassets/AppIcon.appiconset")
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
-    // Render the same symbol, font, color, and proportions as ContentView's header.
+    // Match ContentView's header styling with a larger symbol for the app icon.
     // A white underlay preserves the pale lavender tile against any Dock background.
     let badge = Image(systemName: "door.left.hand.open")
-        .font(.system(size: 27, weight: .medium))
+        .font(.system(size: 35, weight: .medium))
         .foregroundStyle(.indigo)
         .frame(width: 52, height: 52)
         .background(.indigo.opacity(0.1), in: RoundedRectangle(cornerRadius: 13))
