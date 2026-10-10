@@ -9,6 +9,8 @@ final class AutoQuitMonitor: NSObject {
         var policy = QuitPolicy()
         var revision: UInt64 = 0
         var scanTask: Task<Void, Never>?
+        var retryTask: Task<Void, Never>?
+        var retryAttempts = 0
         var eventTask: Task<Void, Never>?
         var quitTask: Task<Void, Never>?
         var scheduledTicket: QuitPolicy.Ticket?
@@ -20,6 +22,9 @@ final class AutoQuitMonitor: NSObject {
             revision &+= 1
             scanTask?.cancel()
             scanTask = nil
+            retryTask?.cancel()
+            retryTask = nil
+            if resetHistory { retryAttempts = 0 }
             eventTask?.cancel()
             eventTask = nil
             quitTask?.cancel()
@@ -158,6 +163,7 @@ final class AutoQuitMonitor: NSObject {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         model.diagnosticLog("\(notification.name.rawValue): \(app?.localizedName ?? "unknown") [\(app?.bundleIdentifier ?? "unknown")] pid=\(app?.processIdentifier ?? 0)", category: "workspace")
         reconcileApps()
+        if let app { scan(app.processIdentifier, reason: "workspace event") }
     }
 
     private func reconcileApps() {
@@ -194,11 +200,21 @@ final class AutoQuitMonitor: NSObject {
     }
 
     @objc private func accessibilityEvent(_ notification: Notification) {
+        let info = notification.userInfo ?? [:]
+        let event = info["notification"] as? String ?? "unknown"
+        // Receipt must be visible even if the PID/refcon or record lookup fails.
+        model.diagnosticLog("\(event); pid=\(String(describing: info["pid"])); observerID=\(String(describing: info["observerID"])); elementID=\(String(describing: info["elementID"])); refconPresent=\(String(describing: info["refconPresent"])); mainThread=\(String(describing: info["mainThread"])); runLoopMode=\(String(describing: info["runLoopMode"]))", category: "ax-callback")
         guard let pid = notification.userInfo?["pid"] as? pid_t,
-              let record = records[pid] else { return }
-        let event = notification.userInfo?["notification"] as? String ?? "unknown"
+              let record = records[pid] else {
+            model.diagnosticLog("Ignored \(event): missing PID or no monitored record", category: "accessibility")
+            return
+        }
         model.diagnosticLog("\(event): \(identity(record)); monitoring=\(canMonitor); pending=\(String(describing: record.policy.pending))", category: "accessibility")
         guard canMonitor else { return }
+        // These are delivery probes. Workspace activation already triggers a scan;
+        // focus changes between applications need not restart a quit countdown.
+        guard event != kAXApplicationActivatedNotification,
+              event != kAXApplicationDeactivatedNotification else { return }
         // Every window event invalidates a queued confirmation, including a window
         // that opens and closes entirely between our ten-second recovery scans.
         record.cancel(resetHistory: false)
@@ -218,6 +234,8 @@ final class AutoQuitMonitor: NSObject {
 
     private func scan(_ pid: pid_t, reason: String = "refresh") {
         guard canMonitor, let record = records[pid], record.scanTask == nil else { return }
+        record.retryTask?.cancel()
+        record.retryTask = nil
         let revision = record.revision
         let session = record.session
         record.scanTask = Task { [weak self, weak record, probe] in
@@ -233,6 +251,25 @@ final class AutoQuitMonitor: NSObject {
             let decision = record.policy.observe(inspection.windows, now: self.now, delay: self.model.delay)
             self.model.diagnosticLog("\(self.identity(record)): decision=\(decision); hasSeenWindow=\(record.policy.hasSeenWindow); quitWasRequested=\(record.policy.quitWasRequested)", category: "decision")
             self.apply(decision, pid: pid, record: record, inspection: inspection)
+            if inspection.needsRetrySoon { self.scheduleObservationRetry(pid, record: record) }
+            else { record.retryAttempts = 0 }
+        }
+    }
+
+    private func scheduleObservationRetry(_ pid: pid_t, record: Record) {
+        // Catch launch-time AX readiness without waiting for the ten-second sweep.
+        // Bound each burst; persistent failures still use normal recovery scans.
+        guard record.retryAttempts < 8 else { return }
+        let delay = min(0.1 * pow(2, Double(record.retryAttempts)), 1)
+        record.retryAttempts += 1
+        let revision = record.revision
+        model.diagnosticLog("Retrying Accessibility setup for \(identity(record)); attempt=\(record.retryAttempts); wait=\(delay)s")
+        record.retryTask = Task { [weak self, weak record] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard !Task.isCancelled, let self, let record, self.canMonitor,
+                  self.records[pid] === record, record.revision == revision else { return }
+            record.retryTask = nil
+            self.scan(pid, reason: "Accessibility setup retry")
         }
     }
 

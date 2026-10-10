@@ -24,10 +24,12 @@ Use the same Apple Development certificate for local builds. The project uses yo
 The underlying Accessibility APIs provide window access on all supported versions. The permission pane is called Device Control and Data Access on macOS 27 and later.
 
 - Accessibility notifications trigger checks after a short settling period and one follow-up check; a ten-second reconciliation recovers missed notifications and discovers apps whose activation policy changed.
+- Launch-time Accessibility failures receive a bounded burst of quick retries. Failed notification subscriptions are retried until the app supports them, including after each relaunch. Window-destruction callbacks use the registered process ID even when the destroyed window's AX reference is invalid.
+- Destruction is observed both application-wide and on tracked windows. Collected logs distinguish raw callback receipt from accepted events and show the observer's run-loop source state. Application activation/deactivation notifications serve as delivery probes without restarting quit countdowns.
 - AX messaging runs on an actor, with bounded per-element timeouts, rather than on the main UI thread.
 - Known Accessibility window references are retained across scans. A window missing from the current list is still counted until its reference becomes explicitly invalid. Minimized and hidden windows remain windows.
-- A fresh public WindowServer catalog (`CGWindowListCopyWindowInfo` with `optionAll`) supplies an independent veto for ordinary offscreen windows. Any positive window evidence keeps the app running.
-- Only a successful empty Accessibility check AND a successful empty WindowServer check permit a quit. A failed or ambiguous check cancels the countdown.
+- A fresh public WindowServer catalog supplies an independent veto for ordinary onscreen windows. Offscreen WindowServer resources can persist after a window closes, so they are logged but do not veto quitting. Retained Accessibility references protect minimized, hidden, and other-Desktop windows. Any positive window evidence keeps the app running.
+- Only a successful empty Accessibility check AND a successful WindowServer check with no ordinary onscreen windows permit a quit. A failed or ambiguous check cancels the countdown.
 - Every window event, pause, rule edit, sleep, session change, and Space transition invalidates pending work. Wake and Space transitions allow three seconds to settle before establishing a fresh baseline.
 - Each process must first have an observed window. Apps already running without windows at startup are left alone.
 - A confirmation ticket is tied to the current countdown generation and process session. An old timer or background result cannot authorize a new quit.
