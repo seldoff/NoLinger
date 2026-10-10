@@ -5,8 +5,8 @@ A native macOS menu bar app that requests a normal quit when an app's last windo
 ## Run
 
 1. Open `NoLinger.xcodeproj` in Xcode, choose the NoLinger scheme, and run.
-2. In No Linger’s **General → Permission and privacy**, click **Grant Access** and enable No Linger in **System Settings → Privacy & Security → Device Control and Data Access** on macOS 27 or later, or **Accessibility** on older macOS versions. No Linger notices the change without requiring a restart.
-3. By default, all regular desktop apps are monitored except the system exclusions. Add apps that should keep running under **Apps**. An optional include-only mode has its own separate list.
+2. In the permission warning at the top of No Linger’s Settings, click **Grant Access** and enable No Linger in **System Settings → Privacy & Security → Device Control and Data Access** on macOS 27 or later, or **Accessibility** on older macOS versions. No Linger notices the change without requiring a restart.
+3. By default, all regular desktop apps are monitored except Finder, which is always protected. The exclusions list starts empty; under **Apps**, use **Add App…** to choose from running apps that aren’t already on the list, or use **Choose from Finder…** to select installed apps, including apps that aren’t running. An optional include-only mode has its own separate list and also keeps Finder protected. Existing built-in exclusions are removed automatically, while user-added exclusions are retained.
 4. Close an eligible app's last window. No Linger waits two seconds by default and requests a normal quit after another window check. Opening another window cancels the wait.
 
 No Linger appears in the Dock while its settings window is open, including when minimized. Closing the window removes its Dock icon and leaves the menu bar app running. If you hide its menu bar icon, open No Linger again from Applications or Spotlight to bring Settings back. Quit No Linger from its menu or settings window.
@@ -15,7 +15,7 @@ Launch at login uses Apple's `SMAppService`. Enable it after placing a signed bu
 
 ## If access is enabled but No Linger still asks for permission
 
-macOS authorizes a signed app identity. An enabled No Linger entry can belong to another copy or an earlier build with a different signature. In **Permission and privacy**, choose **Show This Copy in Finder**, remove the stale No Linger entry in System Settings, and add the revealed app. Enable access, return to No Linger, and choose **Check Again** if needed. Permission is also checked every three seconds and immediately when Settings opens or the app becomes active.
+macOS authorizes a signed app identity. An enabled No Linger entry can belong to another copy or an earlier build with a different signature. Locate the copy you’re running in Finder, remove the stale No Linger entry in System Settings, and add that app with the **+** button. Enable access and return to No Linger. Permission is checked every three seconds and immediately when Settings opens or the app becomes active.
 
 Use the same Apple Development certificate for local builds. The project uses your existing team and this certificate type; avoid overriding it with ad hoc signing (`CODE_SIGN_IDENTITY=-`), which can invalidate grants when the app changes. Public distribution should use Developer ID signing and notarization.
 
@@ -45,7 +45,7 @@ xcodebuild -project NoLinger.xcodeproj -scheme NoLinger \
 swift test
 ```
 
-The Swift package tests the independent `QuitPolicy` state machine. Tests cover the full delay, fresh confirmation, reopened windows, stale tickets, failed checks, lifecycle resets, missed-event recovery, and suppression of repeated quit requests.
+The Swift package tests the independent `QuitPolicy` state machine and app selection rules. Tests cover the full delay, fresh confirmation, reopened windows, stale tickets, failed checks, lifecycle resets, missed-event recovery, suppression of repeated quit requests, Finder protection, and migration of saved app rules.
 
 Debug builds accept `--preview` to display Settings and check real permission status without observing windows or quitting apps. Both configurations accept `--settings` to show Settings on launch.
 

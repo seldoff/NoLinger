@@ -39,16 +39,12 @@ struct ActivityEntry: Identifiable, Sendable {
 
 @MainActor
 final class AppModel: ObservableObject {
-    static let defaultExclusions: [AppRule] = [
-        .init(bundleID: "com.apple.finder", name: "Finder", path: nil),
-        .init(bundleID: "com.apple.systempreferences", name: "System Settings", path: nil),
-        .init(bundleID: "com.apple.ActivityMonitor", name: "Activity Monitor", path: nil),
-        .init(bundleID: "com.apple.AppStore", name: "App Store", path: nil),
-        .init(bundleID: "com.apple.DiskUtility", name: "Disk Utility", path: nil),
-        .init(bundleID: "com.apple.Spotlight", name: "Spotlight", path: nil),
-        .init(bundleID: "com.apple.notificationcenterui", name: "Notification Center", path: nil)
+    private static let protectedBundleIDs: Set<String> = ["com.apple.finder"]
+    private static let legacyDefaultExclusionIDs: Set<String> = [
+        "com.apple.finder", "com.apple.systempreferences", "com.apple.ActivityMonitor",
+        "com.apple.AppStore", "com.apple.DiskUtility", "com.apple.Spotlight",
+        "com.apple.notificationcenterui"
     ]
-    static let importantApps = Set(defaultExclusions.map(\.bundleID))
 
     private let defaults: UserDefaults
     var onConfigurationChange: (() -> Void)?
@@ -74,8 +70,25 @@ final class AppModel: ObservableObject {
         delay = storedDelay.isFinite ? min(10, max(0.2, storedDelay)) : 2
         scope = MonitorScope(rawValue: defaults.string(forKey: "scope") ?? "") ?? .allExceptExcluded
         hideMenuBarIcon = defaults.bool(forKey: "hideMenuBarIcon")
-        exclusions = Self.decodeRules(defaults.data(forKey: "exclusions")) ?? Self.defaultExclusions
-        inclusions = Self.decodeRules(defaults.data(forKey: "inclusions")) ?? []
+        let storedExclusions = Self.decodeRules(defaults.data(forKey: "exclusions"))
+        let storedInclusions = Self.decodeRules(defaults.data(forKey: "inclusions"))
+        let needsExclusionMigration = !defaults.bool(forKey: "systemExclusionsMigrationCompleted")
+        // Built-in exclusions had no path; user-selected apps retain their rules.
+        exclusions = (storedExclusions ?? []).filter {
+            !Self.protectedBundleIDs.contains($0.bundleID)
+                && !(needsExclusionMigration && $0.path == nil
+                     && Self.legacyDefaultExclusionIDs.contains($0.bundleID))
+        }
+        inclusions = (storedInclusions ?? []).filter { !Self.protectedBundleIDs.contains($0.bundleID) }
+        if let storedExclusions, exclusions != storedExclusions {
+            defaults.set(try? JSONEncoder().encode(exclusions), forKey: "exclusions")
+        }
+        if let storedInclusions, inclusions != storedInclusions {
+            defaults.set(try? JSONEncoder().encode(inclusions), forKey: "inclusions")
+        }
+        if needsExclusionMigration {
+            defaults.set(true, forKey: "systemExclusionsMigrationCompleted")
+        }
         refreshLoginStatus()
     }
 
@@ -86,42 +99,67 @@ final class AppModel: ObservableObject {
 
     var activeRules: [AppRule] { scope == .allExceptExcluded ? exclusions : inclusions }
 
-    func revealApplication() {
-        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
-    }
-
     func shouldMonitor(bundleID: String) -> Bool {
-        guard bundleID != Bundle.main.bundleIdentifier else { return false }
+        guard bundleID != Bundle.main.bundleIdentifier,
+              !Self.protectedBundleIDs.contains(bundleID) else { return false }
         switch scope {
         case .allExceptExcluded: return !exclusions.contains { $0.bundleID == bundleID }
         case .onlyIncluded: return inclusions.contains { $0.bundleID == bundleID }
         }
     }
 
-    func addApplication() {
+    func runningApplicationChoices() -> [AppRule] {
+        let candidates = NSWorkspace.shared.runningApplications.compactMap { app -> AppRule? in
+            guard app.activationPolicy == .regular, !app.isTerminated,
+                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                  let bundleID = app.bundleIdentifier else { return nil }
+            return AppRule(bundleID: bundleID, name: app.localizedName ?? bundleID,
+                           path: app.bundleURL?.path)
+        }
+        return applicationChoices(from: candidates)
+    }
+
+    func applicationChoices(from candidates: [AppRule]) -> [AppRule] {
+        var unavailableIDs = Set(activeRules.map(\.bundleID)).union(Self.protectedBundleIDs)
+        if let ownBundleID = Bundle.main.bundleIdentifier { unavailableIDs.insert(ownBundleID) }
+        return candidates.filter { unavailableIDs.insert($0.bundleID).inserted }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    func addApplication(_ rule: AppRule) {
+        guard rule.bundleID != Bundle.main.bundleIdentifier,
+              !Self.protectedBundleIDs.contains(rule.bundleID),
+              !activeRules.contains(where: { $0.bundleID == rule.bundleID }) else { return }
+        if scope == .allExceptExcluded { exclusions.append(rule) } else { inclusions.append(rule) }
+        persistRules()
+    }
+
+    func chooseApplicationsFromFinder() {
         let panel = NSOpenPanel()
         panel.title = scope == .allExceptExcluded ? "Exclude an app" : "Include an app"
         panel.allowedContentTypes = [.application]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK else { return }
-        for url in panel.urls {
-            guard let bundle = Bundle(url: url), let id = bundle.bundleIdentifier,
-                  id != Bundle.main.bundleIdentifier else { continue }
-            if scope == .onlyIncluded, Self.importantApps.contains(id), !confirmImportantApp(id) { continue }
+        panel.begin { [weak self] response in
+            guard response == .OK else { return }
+            self?.addApplications(at: panel.urls)
+        }
+    }
+
+    func addApplications(at urls: [URL]) {
+        for url in urls {
+            guard let bundle = Bundle(url: url), let bundleID = bundle.bundleIdentifier else { continue }
             let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
                 ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
                 ?? url.deletingPathExtension().lastPathComponent
-            let rule = AppRule(bundleID: id, name: name, path: url.path)
-            if !activeRules.contains(where: { $0.bundleID == id }) {
-                if scope == .allExceptExcluded { exclusions.append(rule) } else { inclusions.append(rule) }
-            }
+            addApplication(AppRule(bundleID: bundleID, name: name, path: url.path))
         }
-        persistRules()
     }
 
     func exclude(_ app: MonitoredApp) {
+        guard app.bundleID != Bundle.main.bundleIdentifier,
+              !Self.protectedBundleIDs.contains(app.bundleID) else { return }
         let rule = AppRule(bundleID: app.bundleID, name: app.name, path: app.path)
         if !exclusions.contains(where: { $0.bundleID == app.bundleID }) { exclusions.append(rule) }
         inclusions.removeAll { $0.bundleID == app.bundleID }
@@ -129,17 +167,8 @@ final class AppModel: ObservableObject {
     }
 
     func removeRule(_ rule: AppRule) {
-        if scope == .allExceptExcluded, Self.importantApps.contains(rule.bundleID),
-           !confirmImportantApp(rule.bundleID) { return }
         if scope == .allExceptExcluded { exclusions.removeAll { $0.id == rule.id } }
         else { inclusions.removeAll { $0.id == rule.id } }
-        persistRules()
-    }
-
-    func restoreExclusions() {
-        for rule in Self.defaultExclusions where !exclusions.contains(where: { $0.id == rule.id }) {
-            exclusions.append(rule)
-        }
         persistRules()
     }
 
@@ -185,15 +214,5 @@ final class AppModel: ObservableObject {
 
     private static func decodeRules(_ data: Data?) -> [AppRule]? {
         data.flatMap { try? JSONDecoder().decode([AppRule].self, from: $0) }
-    }
-
-    private func confirmImportantApp(_ bundleID: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Allow No Linger to quit this system app?"
-        alert.informativeText = "\(bundleID) is normally excluded. It may be needed even when it has no windows."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Allow Auto-Quit")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
     }
 }

@@ -4,9 +4,8 @@ import ServiceManagement
 struct ContentView: View {
     @ObservedObject var model: AppModel
     var onGrantAccess: () -> Void
-    var onOpenAccess: () -> Void
-    var onCheckAccess: () -> Void = {}
     @State private var tab = 0
+    @State private var showingRunningApps = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -104,30 +103,6 @@ struct ContentView: View {
                     Text(message).font(.caption).foregroundStyle(.orange)
                 }
             } header: { Text("Startup and appearance") }
-
-            Section {
-                HStack {
-                    Label("\(model.windowAccessPermissionName) \(model.accessibilityGranted ? "enabled" : "required")",
-                          systemImage: model.accessibilityGranted ? "checkmark.shield" : "exclamationmark.shield")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("System Settings…", action: onOpenAccess)
-                }
-                Text("System Settings → Privacy & Security → \(model.windowAccessPermissionName)")
-                    .font(.caption).foregroundStyle(.secondary)
-                if !model.accessibilityGranted {
-                    HStack {
-                        Button("Grant Access", action: onGrantAccess)
-                        Button("Show This Copy in Finder") { model.revealApplication() }
-                            .help(Bundle.main.bundleURL.path)
-                        Button("Check Again", action: onCheckAccess)
-                    }
-                    Text("If No Linger isn’t listed, use Show This Copy in Finder and add that app with the + button in System Settings.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Text("No screen recording permission is needed. No Linger reads window metadata, never screenshots or window titles.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } header: { Text("Permission and privacy") }
         }
         .formStyle(.grouped)
     }
@@ -156,10 +131,6 @@ struct ContentView: View {
                             Text(rule.bundleID).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if AppModel.importantApps.contains(rule.bundleID) {
-                            Image(systemName: "shield").foregroundStyle(.secondary)
-                                .help("System app: changing protection requires confirmation")
-                        }
                         Button { model.removeRule(rule) } label: { Image(systemName: "minus.circle") }
                             .buttonStyle(.borderless).help("Remove \(rule.name) from this list")
                     }
@@ -170,36 +141,12 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             HStack {
-                Button("Add App…", systemImage: "plus") { model.addApplication() }
-                Spacer()
-                if model.scope == .allExceptExcluded {
-                    Button("Restore System Exclusions") { model.restoreExclusions() }
-                }
-            }
-            Divider().padding(.vertical, 2)
-            HStack {
-                Text("Currently monitored").font(.headline)
-                Spacer()
-                Text("\(model.monitoredApps.count) apps").font(.caption).foregroundStyle(.secondary)
-            }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 9) {
-                    if model.monitoredApps.isEmpty {
-                        Text(model.accessibilityGranted ? "No eligible apps are running." : "Grant \(model.windowAccessPermissionName) to see running apps.")
-                            .foregroundStyle(.secondary).font(.caption)
+                Button("Add App…", systemImage: "plus") { showingRunningApps = true }
+                    .popover(isPresented: $showingRunningApps, arrowEdge: .bottom) {
+                        RunningAppsPicker(model: model)
                     }
-                    ForEach(model.monitoredApps) { app in
-                        HStack {
-                            Text(app.name)
-                            Spacer()
-                            Text(app.status).font(.caption)
-                                .foregroundStyle(app.isPending ? Color.orange : Color.secondary)
-                            Button("Exclude") { model.exclude(app) }.buttonStyle(.borderless)
-                        }
-                    }
-                }
+                Spacer()
             }
-            .frame(minHeight: 65, idealHeight: 100)
         }
         .padding(22)
     }
@@ -235,7 +182,98 @@ struct ContentView: View {
     }
 }
 
+private struct RunningAppsPicker: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var applications: [AppRule] = []
+    @State private var search = ""
+
+    private var matchingApplications: [AppRule] {
+        applications.filter {
+            search.isEmpty || $0.name.localizedStandardContains(search)
+                || $0.bundleID.localizedStandardContains(search)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(model.scope == .allExceptExcluded ? "Exclude an app" : "Include an app")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            TextField("Search running apps", text: $search)
+                .textFieldStyle(.roundedBorder)
+
+            if matchingApplications.isEmpty {
+                VStack(spacing: 6) {
+                    Text(applications.isEmpty ? "No apps to add" : "No matching apps")
+                        .fontWeight(.medium)
+                    Text(applications.isEmpty
+                         ? "Open an app or choose one from Finder."
+                         : "Try a different name.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(matchingApplications) { app in
+                            Button {
+                                model.addApplication(app)
+                                refreshApplications()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(nsImage: model.icon(path: app.path, bundleID: app.bundleID))
+                                        .resizable().frame(width: 28, height: 28)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(app.name).lineLimit(1)
+                                        Text(app.bundleID).font(.caption).foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "plus.circle").foregroundStyle(.secondary)
+                                }
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Add \(app.name)")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Choose from Finder…", systemImage: "folder") {
+                dismiss()
+                model.chooseApplicationsFromFinder()
+            }
+        }
+        .padding(16)
+        .frame(width: 370, height: 360)
+        .onAppear { refreshApplications() }
+        .onChange(of: model.activeRules) { refreshApplications() }
+        .onChange(of: model.scope) { refreshApplications() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in
+            refreshApplications()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
+            refreshApplications()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)) { _ in
+            refreshApplications()
+        }
+    }
+
+    private func refreshApplications() {
+        applications = model.runningApplicationChoices()
+    }
+}
+
 #Preview {
     ContentView(model: AppModel(defaults: UserDefaults(suiteName: "NoLinger.Preview")!),
-                onGrantAccess: {}, onOpenAccess: {})
+                onGrantAccess: {})
 }

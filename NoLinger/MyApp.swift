@@ -74,9 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openSettings() {
         monitor.refreshPermission()
         if settingsWindow == nil {
-            let view = ContentView(model: model, onGrantAccess: { [weak self] in self?.monitor.openAccessibilitySettings() },
-                                   onOpenAccess: { [weak self] in self?.monitor.openAccessibilitySettings() },
-                                   onCheckAccess: { [weak self] in self?.monitor.refreshPermission() })
+            let view = ContentView(model: model, onGrantAccess: { [weak self] in self?.monitor.openAccessibilitySettings() })
             let window = NSWindow(contentViewController: NSHostingController(rootView: view))
             window.title = "No Linger"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
