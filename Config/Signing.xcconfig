@@ -1,0 +1,2 @@
+// Copy Local.xcconfig.example to Local.xcconfig to configure signing on this Mac.
+#include? "Local.xcconfig"
